@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import time
 from typing import Any, Dict, List, Tuple, Union
 
 import attr
+import httpx
 import inflection
 from dateutil.parser import parse
 from decorator import decorator
@@ -28,8 +30,11 @@ MAX_GET_LIMIT = 200
 
 
 @decorator
-def handle_response(func, *args, **kwargs) -> Dict:
+async def handle_response(func, *args, **kwargs) -> Dict:
     response = func(*args, **kwargs)
+
+    if asyncio.coroutines.iscoroutine(response):
+        response = await response
 
     if isinstance(response, List):
         res = {}
@@ -90,7 +95,7 @@ class Coda:
         self.authorization = {"Authorization": f"Bearer {self.api_key}"}
 
     @handle_response
-    def get(self, endpoint: str, data: Dict = None, limit=None, offset=None) -> Dict:
+    async def get(self, endpoint: str, data: Dict = None, limit=None, offset=None) -> Dict:
         """
         Makes a GET request to API endpoint.
 
@@ -113,15 +118,16 @@ class Coda:
 
         if offset:
             data["pageToken"] = offset
-        r = requests.get(self.href + endpoint, params=data, headers=self.authorization)
-        if limit or not r.json().get("nextPageLink"):
-            return r
+        async with httpx.AsyncClient() as client:
+            r = await client.get(self.href + endpoint, params=data, headers=self.authorization)
+            if limit or not r.json().get("nextPageLink"):
+                return r
 
-        res = [r]
-        while r.json().get("nextPageLink"):
-            next_page = r.json()["nextPageLink"]
-            r = requests.get(next_page, headers=self.authorization)
-            res.append(r)
+            res = [r]
+            while r.json().get("nextPageLink"):
+                next_page = r.json()["nextPageLink"]
+                r = await client.get(next_page, headers=self.authorization)
+                res.append(r)
         return res
 
     # noinspection PyTypeChecker
@@ -321,7 +327,7 @@ class Coda:
         """
         return self.get(f"/docs/{doc_id}/folders/{folder_id_or_name}")
 
-    def list_tables(self, doc_id: str, offset: int = None, limit: int = None) -> Dict:
+    async def list_tables(self, doc_id: str, offset: int = None, limit: int = None) -> Dict:
         """
         Returns a list of tables in a Coda doc.
 
@@ -335,7 +341,7 @@ class Coda:
 
         :return:
         """
-        return self.get(f"/docs/{doc_id}/tables", offset=offset, limit=limit)
+        return await self.get(f"/docs/{doc_id}/tables", offset=offset, limit=limit)
 
     def get_table(self, doc_id: str, table_id_or_name: str) -> Dict:
         """
@@ -724,9 +730,9 @@ class Document:
         """
         return cls(id=doc_id, coda=Coda.from_environment())
 
-    def __attrs_post_init__(self):
+    async def __attrs_post_init__(self):
         self.href = f"/docs/{self.id}"
-        data = self.coda.get(self.href + "/")
+        data = await self.coda.get(self.href + "/")
         if not data:
             raise err.DocumentNotFound(f"No document with id {self.id}")
         self.name = data["name"]
@@ -753,7 +759,7 @@ class Document:
             ]
         ]
 
-    def list_tables(self, offset: int = None, limit: int = None) -> List[Table]:
+    async def list_tables(self, offset: int = None, limit: int = None) -> List[Table]:
         """
         Returns a list of `Table` objects for each table in the document.
 
@@ -766,7 +772,7 @@ class Document:
 
         return [
             Table.from_json(i, document=self)
-            for i in self.coda.list_tables(self.id, offset=offset, limit=limit)["items"]
+            for i in (await self.coda.list_tables(self.id, offset=offset, limit=limit))["items"]
         ]
 
     def get_table(self, table_id_or_name: str) -> Table:
@@ -833,7 +839,7 @@ class Table(CodaObject):
             return self.get_row_by_id(item.id)
         raise ValueError("item type must be in [str, Row]")
 
-    def columns(self, offset: int = None, limit: int = None) -> List[Column]:
+    async def columns(self, offset: int = None, limit: int = None) -> List[Column]:
         """
         Lists Table columns.
 
@@ -849,13 +855,13 @@ class Table(CodaObject):
         if not self.columns_storage:
             self.columns_storage = [
                 Column.from_json({**i, "table": self}, document=self.document)
-                for i in self.document.coda.list_columns(
+                for i in (await self.document.coda.list_columns(
                     self.document.id, self.id, offset=offset, limit=limit
-                )["items"]
+                ))["items"]
             ]
         return self.columns_storage
 
-    def rows(self, offset: int = None, limit: int = None) -> List[Row]:
+    async def rows(self, offset: int = None, limit: int = None) -> List[Row]:
         """
         Returns list of Table rows.
 
@@ -867,9 +873,9 @@ class Table(CodaObject):
         """
         return [
             Row.from_json({"table": self, **i}, document=self.document)
-            for i in self.document.coda.list_rows(
+            for i in (await self.document.coda.list_rows(
                 self.document.id, self.id, offset=offset, limit=limit
-            )["items"]
+            ))["items"]
         ]
 
     def get_row_by_id(self, row_id: str) -> Row:
