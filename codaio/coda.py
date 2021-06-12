@@ -12,6 +12,9 @@ import inflection
 from dateutil.parser import parse
 from decorator import decorator
 from envparse import env
+####
+import inspect
+####
 
 from codaio import err
 
@@ -262,7 +265,7 @@ class Coda:
         """
         return self.delete("/docs/" + doc_id)
 
-    def list_sections(self, doc_id: str, offset: int = None, limit: int = None) -> Dict:
+    async def list_sections(self, doc_id: str, offset: int = None, limit: int = None) -> Dict:
         """
         Returns a list of sections in a Coda doc.
 
@@ -276,7 +279,7 @@ class Coda:
 
         :return:
         """
-        return self.get(f"/docs/{doc_id}/pages", offset=offset, limit=limit)
+        return await self.get(f"/docs/{doc_id}/pages", offset=offset, limit=limit)
 
     def get_section(self, doc_id: str, section_id_or_name: str) -> Dict:
         """
@@ -697,7 +700,10 @@ class CodaObject:
     document: Document = attr.ib(repr=False)
 
     @classmethod
-    def from_json(cls, js: Dict, *, document: Document):
+    async def from_json(cls, js: Dict, *, document: Document):
+        if asyncio.coroutines.iscoroutine(js):
+            js = await js
+
         js = {inflection.underscore(k): v for k, v in js.items()}
         for key in ["parent", "format"]:
             if key in js:
@@ -730,7 +736,15 @@ class Document:
         """
         return cls(id=doc_id, coda=Coda.from_environment())
 
-    async def __attrs_post_init__(self):
+    async def post_init(self):
+        """
+        This was initially the `__attrs_post_init__()` method, but due to making the `get()` method
+        asynchronous, I had to await this somehow. I was getting the `tracemalloc` warning otherwise.
+
+        Hence the jank.
+
+        :return:
+        """
         self.href = f"/docs/{self.id}"
         data = await self.coda.get(self.href + "/")
         if not data:
@@ -742,7 +756,7 @@ class Document:
         self.type = data["type"]
         self.browser_link = data["browserLink"]
 
-    def list_sections(self, offset: int = None, limit: int = None) -> List[Section]:
+    async def list_sections(self, offset: int = None, limit: int = None) -> List[Section]:
         """
         Returns a list of `Section` objects for each section in the document.
 
@@ -753,8 +767,8 @@ class Document:
         :return:
         """
         return [
-            Section.from_json(i, document=self)
-            for i in self.coda.list_sections(self.id, offset=offset, limit=limit)[
+            await Section.from_json(i, document=self)
+            for i in await (self.coda.list_sections(self.id, offset=offset, limit=limit))[
                 "items"
             ]
         ]
@@ -771,7 +785,7 @@ class Document:
         """
 
         return [
-            Table.from_json(i, document=self)
+            await Table.from_json(i, document=self)
             for i in (await self.coda.list_tables(self.id, offset=offset, limit=limit))["items"]
         ]
 
@@ -854,7 +868,7 @@ class Table(CodaObject):
         """
         if not self.columns_storage:
             self.columns_storage = [
-                Column.from_json({**i, "table": self}, document=self.document)
+                await Column.from_json({**i, "table": self}, document=self.document)
                 for i in (await self.document.coda.list_columns(
                     self.document.id, self.id, offset=offset, limit=limit
                 ))["items"]
@@ -872,7 +886,7 @@ class Table(CodaObject):
         :return:
         """
         return [
-            Row.from_json({"table": self, **i}, document=self.document)
+            await Row.from_json({"table": self, **i}, document=self.document)
             for i in (await self.document.coda.list_rows(
                 self.document.id, self.id, offset=offset, limit=limit
             ))["items"]
